@@ -94,9 +94,7 @@ void Clerk::Init(std::string configFileName) {
   for (const auto& item : ipPortVt) {
     std::string ip = item.first;
     short port = item.second;
-    // 2024-01-04 todo：bug fix
-    auto* rpc = new raftServerRpcUtil(ip, port);
-    m_servers.push_back(std::shared_ptr<raftServerRpcUtil>(rpc));
+    m_servers.push_back(std::make_shared<raftServerRpcUtil>(ip, port));
   }
 }
 

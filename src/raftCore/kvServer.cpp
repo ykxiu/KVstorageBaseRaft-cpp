@@ -10,31 +10,19 @@ void KvServer::DprintfKVDB() {
   }
   std::lock_guard<std::mutex> lg(m_mtx);
   DEFER {
-    // for (const auto &item: m_kvDB) {
-    //     DPrintf("[DBInfo ----]Key : %s, Value : %s", &item.first, &item.second);
-    // }
     m_skipList.display_list();
   };
 }
 
 void KvServer::ExecuteAppendOpOnKVDB(Op op) {
-  // if op.IfDuplicate {   //get请求是可重复执行的，因此可以不用判复
-  //	return
-  // }
+
   m_mtx.lock();
 
   m_skipList.insert_set_element(op.Key, op.Value);
 
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     m_kvDB[op.Key] = m_kvDB[op.Key] + op.Value;
-  // } else {
-  //     m_kvDB.insert(std::make_pair(op.Key, op.Value));
-  // }
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExeAPPEND-----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
   DprintfKVDB();
 }
 
@@ -44,34 +32,20 @@ void KvServer::ExecuteGetOpOnKVDB(Op op, std::string *value, bool *exist) {
   *exist = false;
   if (m_skipList.search_element(op.Key, *value)) {
     *exist = true;
-    // *value = m_skipList.se //value已经完成赋值了
   }
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     *exist = true;
-  //     *value = m_kvDB[op.Key];
-  // }
+
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  if (*exist) {
-    //                DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, value :%v", op.ClientId,
-    //                op.RequestId, op.Key, value)
-  } else {
-    //        DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, But No KEY!!!!", op.ClientId,
-    //        op.RequestId, op.Key)
-  }
   DprintfKVDB();
 }
 
 void KvServer::ExecutePutOpOnKVDB(Op op) {
   m_mtx.lock();
   m_skipList.insert_set_element(op.Key, op.Value);
-  // m_kvDB[op.Key] = op.Value;
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExePUT----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
   DprintfKVDB();
 }
 
@@ -424,8 +398,7 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
     }
     std::string otherNodeIp = ipPortVt[i].first;
     short otherNodePort = ipPortVt[i].second;
-    auto *rpc = new RaftRpcUtil(otherNodeIp, otherNodePort);
-    servers.push_back(std::shared_ptr<RaftRpcUtil>(rpc));
+    servers.push_back(std::make_shared<RaftRpcUtil>(otherNodeIp, otherNodePort));
 
     std::cout << "node" << m_me << " 连接node" << i << "success!" << std::endl;
   }
@@ -445,6 +418,6 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   if (!snapshot.empty()) {
     ReadSnapShotToInstall(snapshot);
   }
-  std::thread t2(&KvServer::ReadRaftApplyCommandLoop, this);  //马上向其他节点宣告自己就是leader
+  std::thread t2(&KvServer::ReadRaftApplyCommandLoop, this);
   t2.join();  //由於ReadRaftApplyCommandLoop一直不會結束，达到一直卡在这的目的
 }
