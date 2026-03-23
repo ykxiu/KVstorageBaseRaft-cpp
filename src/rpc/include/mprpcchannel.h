@@ -24,6 +24,7 @@ class MprpcChannel : public google::protobuf::RpcChannel {
                   const google::protobuf::Message *request, google::protobuf::Message *response,
                   google::protobuf::Closure *done) override;
   MprpcChannel(string ip, short port, bool connectNow);
+  bool isConnected() const { return m_clientFd != -1; }
 
  private:
   int m_clientFd;

@@ -64,6 +64,18 @@ class Raft : public raftRpcProctoc::raftRpc {
   int m_lastSnapshotIncludeIndex;
   int m_lastSnapshotIncludeTerm;
 
+  // 优化1：立即复制 — Start() 写入新日志后通知 leaderHearBeatTicker 立即触发复制
+  std::mutex m_replicateMtx;
+  std::condition_variable m_replicateCv;
+  std::atomic<bool> m_hasNewEntry{false};
+
+  // 优化2：事件驱动 applier — commitIndex 推进时通知 applierTicker 立即 apply
+  std::mutex m_applyCvMtx;
+  std::condition_variable m_applyCv;
+
+  // 优化3：线程池 — 替代高频 std::thread + detach
+  ThreadPool m_threadPool;
+
 
  public:
   void AppendEntries1(const raftRpcProctoc::AppendEntriesArgs *args, raftRpcProctoc::AppendEntriesReply *reply);
@@ -109,6 +121,7 @@ class Raft : public raftRpcProctoc::raftRpc {
   std::string persistData();
 
   void Start(Op command, int *newLogIndex, int *newLogTerm, bool *isLeader);
+  int GetCommitIndex();  // 优化4：ReadIndex 读，KvServer 调用获取当前 commitIndex
 
   // Snapshot the service says it has created a snapshot that has
   // all info up to and including index. this means the

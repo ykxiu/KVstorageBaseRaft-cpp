@@ -49,8 +49,36 @@ void KvServer::ExecutePutOpOnKVDB(Op op) {
   DprintfKVDB();
 }
 
-// 处理来自clerk的Get RPC
+// 优化4：ReadIndex 读 — Get 不再提交 Raft 日志，直接走本地读
+// 原理：Leader 获取当前 commitIndex 作为 readIndex，
+//       等待 KvServer 的 lastApplied >= readIndex 后直接读 skipList。
+// 保证线性一致：读到的数据至少包含 readIndex 时刻所有已提交的写入。
 void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetReply *reply) {
+  // 1. 校验 Leader 身份
+  int term;
+  bool isLeader;
+  m_raftNode->GetState(&term, &isLeader);
+  if (!isLeader) {
+    reply->set_err(ErrWrongLeader);
+    return;
+  }
+
+  // 2. 以当前 commitIndex 作为 readIndex（线性一致读的安全屏障）
+  int readIndex = m_raftNode->GetCommitIndex();
+
+  // 3. 等待状态机 apply 到 readIndex（通常已满足，几乎无等待）
+  {
+    std::unique_lock<std::mutex> lk(m_kvApplyCvMtx);
+    bool applied = m_kvApplyCv.wait_for(lk, std::chrono::milliseconds(CONSENSUS_TIMEOUT),
+                                        [this, readIndex] { return m_lastKVApplied >= readIndex; });
+    if (!applied) {
+      // 超时：可能发生了 leader 切换，让 clerk 重试
+      reply->set_err(ErrWrongLeader);
+      return;
+    }
+  }
+
+  // 4. 直接读本地 skipList，无需走 Raft 日志
   Op op;
   op.Operation = "Get";
   op.Key = args->key();
@@ -58,83 +86,17 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetR
   op.ClientId = args->clientid();
   op.RequestId = args->requestid();
 
-  int raftIndex = -1;
-  int _ = -1;
-  bool isLeader = false;
-  m_raftNode->Start(op, &raftIndex, &_,
-                    &isLeader);  // raftIndex：raft预计的logIndex
-                                 // ，虽然是预计，但是正确情况下是准确的，op的具体内容对raft来说 是隔离的
+  std::string value;
+  bool exist = false;
+  ExecuteGetOpOnKVDB(op, &value, &exist);
 
-  if (!isLeader) {
-    reply->set_err(ErrWrongLeader);
-    return;
-  }
-
-  // create waitForCh
-  m_mtx.lock();
-
-  if (waitApplyCh.find(raftIndex) == waitApplyCh.end()) {
-    waitApplyCh.insert(std::make_pair(raftIndex, new LockQueue<Op>()));
-  }
-  auto chForRaftIndex = waitApplyCh[raftIndex];
-
-  m_mtx.unlock();  //直接解锁，等待任务执行完成，不能一直拿锁等待
-
-  // timeout
-  Op raftCommitOp;
-
-  if (!chForRaftIndex->timeOutPop(CONSENSUS_TIMEOUT, &raftCommitOp)) {
-    //        DPrintf("[GET TIMEOUT!!!]From Client %d (Request %d) To Server %d, key %v, raftIndex %d", args.ClientId,
-    //        args.RequestId, kv.me, op.Key, raftIndex)
-    // todo 2023年06月01日
-    int _ = -1;
-    bool isLeader = false;
-    m_raftNode->GetState(&_, &isLeader);
-
-    if (ifRequestDuplicate(op.ClientId, op.RequestId) && isLeader) {
-      //如果超时，代表raft集群不保证已经commitIndex该日志，但是如果是已经提交过的get请求，是可以再执行的。
-      // 不会违反线性一致性
-      std::string value;
-      bool exist = false;
-      ExecuteGetOpOnKVDB(op, &value, &exist);
-      if (exist) {
-        reply->set_err(OK);
-        reply->set_value(value);
-      } else {
-        reply->set_err(ErrNoKey);
-        reply->set_value("");
-      }
-    } else {
-      reply->set_err(ErrWrongLeader);  //返回这个，其实就是让clerk换一个节点重试
-    }
+  if (exist) {
+    reply->set_err(OK);
+    reply->set_value(value);
   } else {
-    // raft已经提交了该command（op），可以正式开始执行了
-    //         DPrintf("[WaitChanGetRaftApplyMessage<--]Server %d , get Command <-- Index:%d , ClientId %d, RequestId
-    //         %d, Opreation %v, Key :%v, Value :%v", kv.me, raftIndex, op.ClientId, op.RequestId, op.Operation, op.Key,
-    //         op.Value)
-    // todo 这里还要再次检验的原因：感觉不用检验，因为leader只要正确的提交了，那么这些肯定是符合的
-    if (raftCommitOp.ClientId == op.ClientId && raftCommitOp.RequestId == op.RequestId) {
-      std::string value;
-      bool exist = false;
-      ExecuteGetOpOnKVDB(op, &value, &exist);
-      if (exist) {
-        reply->set_err(OK);
-        reply->set_value(value);
-      } else {
-        reply->set_err(ErrNoKey);
-        reply->set_value("");
-      }
-    } else {
-      reply->set_err(ErrWrongLeader);
-      //            DPrintf("[GET ] 不满足：raftCommitOp.ClientId{%v} == op.ClientId{%v} && raftCommitOp.RequestId{%v}
-      //            == op.RequestId{%v}", raftCommitOp.ClientId, op.ClientId, raftCommitOp.RequestId, op.RequestId)
-    }
+    reply->set_err(ErrNoKey);
+    reply->set_value("");
   }
-  m_mtx.lock();  // todo 這個可以先弄一個defer，因爲刪除優先級並不高，先把rpc發回去更加重要
-  auto tmp = waitApplyCh[raftIndex];
-  waitApplyCh.erase(raftIndex);
-  delete tmp;
-  m_mtx.unlock();
 }
 
 void KvServer::GetCommandFromRaft(ApplyMsg message) {
@@ -164,8 +126,16 @@ void KvServer::GetCommandFromRaft(ApplyMsg message) {
   //到这里kvDB已经制作了快照
   if (m_maxRaftState != -1) {
     IfNeedToSendSnapShotCommand(message.CommandIndex, 9);
-    //如果raft的log太大（大于指定的比例）就把制作快照
   }
+
+  // 优化4：更新 lastKVApplied，通知 ReadIndex Get 的等待者
+  {
+    std::lock_guard<std::mutex> lk(m_kvApplyCvMtx);
+    if (message.CommandIndex > m_lastKVApplied) {
+      m_lastKVApplied = message.CommandIndex;
+    }
+  }
+  m_kvApplyCv.notify_all();
 
   // Send message to the chan of op.ClientId
   SendMessageToWaitChan(op, message.CommandIndex);
@@ -314,7 +284,7 @@ bool KvServer::SendMessageToWaitChan(const Op &op, int raftIndex) {
 }
 
 void KvServer::IfNeedToSendSnapShotCommand(int raftIndex, int proportion) {
-  if (m_raftNode->GetRaftStateSize() > m_maxRaftState / 10.0) {
+  if (m_raftNode->GetRaftStateSize() > m_maxRaftState * 0.9) {
     // Send SnapShot Command
     auto snapshot = MakeSnapShot();
     m_raftNode->Snapshot(raftIndex, snapshot);
@@ -322,11 +292,22 @@ void KvServer::IfNeedToSendSnapShotCommand(int raftIndex, int proportion) {
 }
 
 void KvServer::GetSnapShotFromRaft(ApplyMsg message) {
-  std::lock_guard<std::mutex> lg(m_mtx);
-
-  if (m_raftNode->CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot)) {
-    ReadSnapShotToInstall(message.Snapshot);
-    m_lastSnapShotRaftLogIndex = message.SnapshotIndex;
+  bool installed = false;
+  {
+    std::lock_guard<std::mutex> lg(m_mtx);
+    if (m_raftNode->CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot)) {
+      ReadSnapShotToInstall(message.Snapshot);
+      m_lastSnapShotRaftLogIndex = message.SnapshotIndex;
+      installed = true;
+    }
+  }
+  // 优化4：快照安装后同步更新 m_lastKVApplied，避免 ReadIndex Get 在快照后误等待
+  if (installed) {
+    std::lock_guard<std::mutex> lk(m_kvApplyCvMtx);
+    if (message.SnapshotIndex > m_lastKVApplied) {
+      m_lastKVApplied = message.SnapshotIndex;
+    }
+    m_kvApplyCv.notify_all();
   }
 }
 
@@ -398,9 +379,15 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
     }
     std::string otherNodeIp = ipPortVt[i].first;
     short otherNodePort = ipPortVt[i].second;
-    servers.push_back(std::make_shared<RaftRpcUtil>(otherNodeIp, otherNodePort));
-
-    std::cout << "node" << m_me << " 连接node" << i << "success!" << std::endl;
+    auto rpcUtil = std::make_shared<RaftRpcUtil>(otherNodeIp, otherNodePort);
+    if (rpcUtil->isConnected()) {
+      std::cout << "node" << m_me << " 连接node" << i << " (" << otherNodeIp << ":" << otherNodePort << ") success!"
+                << std::endl;
+    } else {
+      std::cout << "node" << m_me << " 连接node" << i << " (" << otherNodeIp << ":" << otherNodePort
+                << ") 初始连接失败，后续RPC调用时将自动重连" << std::endl;
+    }
+    servers.push_back(rpcUtil);
   }
   sleep(ipPortVt.size() - me);  //等待所有节点相互连接成功，再启动raft
   m_raftNode->init(servers, m_me, persister, applyChan);

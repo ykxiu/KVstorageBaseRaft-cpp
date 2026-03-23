@@ -72,17 +72,6 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
   // 最后，将请求参数附加到send_rpc_str后面
   send_rpc_str += args_str;
 
-  // 打印调试信息
-  //    std::cout << "============================================" << std::endl;
-  //    std::cout << "header_size: " << header_size << std::endl;
-  //    std::cout << "rpc_header_str: " << rpc_header_str << std::endl;
-  //    std::cout << "service_name: " << service_name << std::endl;
-  //    std::cout << "method_name: " << method_name << std::endl;
-  //    std::cout << "args_str: " << args_str << std::endl;
-  //    std::cout << "============================================" << std::endl;
-
-  // 发送rpc请求
-  //失败会重试连接再发送，重试连接失败会直接return
   while (-1 == send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), 0)) {
     char errtxt[512] = {0};
     sprintf(errtxt, "send error! errno:%d", errno);
@@ -109,6 +98,13 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
     char errtxt[512] = {0};
     sprintf(errtxt, "recv error! errno:%d", errno);
     controller->SetFailed(errtxt);
+    return;
+  }
+  // recv() == 0 表示对端关闭连接，需重置 fd 以触发下次重连
+  if (recv_size == 0) {
+    close(m_clientFd);
+    m_clientFd = -1;
+    controller->SetFailed("peer closed connection");
     return;
   }
 
@@ -150,6 +146,14 @@ bool MprpcChannel::newConnect(const char* ip, uint16_t port, string* errMsg) {
     return false;
   }
   m_clientFd = clientfd;
+
+  // 设置接收超时：CONSENSUS_TIMEOUT=500ms，选举最多 500ms，多轮重试最多 3×500ms≈1.5s
+  // 设置 6s 给极端情况（如快照占用 m_mtx 导致多轮重试）留足裕量
+  struct timeval tv;
+  tv.tv_sec = 6;
+  tv.tv_usec = 0;
+  setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
   return true;
 }
 
@@ -170,5 +174,9 @@ MprpcChannel::MprpcChannel(string ip, short port, bool connectNow) : m_ip(ip), m
   while (!rt && tryCount--) {
     std::cout << errMsg << std::endl;
     rt = newConnect(ip.c_str(), port, &errMsg);
+  }
+  if (!rt) {
+    std::cerr << "[MprpcChannel] 初始连接 " << ip << ":" << port
+              << " 失败（已重试3次）。请确认服务端已启动，或等待集群就绪后再启动客户端。" << std::endl;
   }
 }

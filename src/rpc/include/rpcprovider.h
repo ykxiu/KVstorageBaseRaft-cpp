@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include "google/protobuf/service.h"
+#include "util.h"
 
 // 框架提供的专门发布rpc服务的网络对象类
 // todo:现在rpc客户端变成了 长连接，因此rpc服务器这边最好提供一个定时器，用以断开很久没有请求的连接。
@@ -32,6 +33,11 @@ class RpcProvider {
   };
   // 存储注册成功的服务对象和其服务方法的所有信息
   std::unordered_map<std::string, ServiceInfo> m_serviceMap;
+
+  // worker 线程池：RPC handler（如 Get/PutAppend）可能阻塞长达 500ms，
+  // 不能在 Muduo IO 线程里直接执行，否则会饿死所有连接（包括 Raft 内部 RPC）。
+  // 64 个线程足以覆盖 50 并发客户端 + Raft 内部 RPC 的并发量。
+  ThreadPool m_workerPool{64};
 
   // 新的socket连接回调
   void OnConnection(const muduo::net::TcpConnectionPtr &);

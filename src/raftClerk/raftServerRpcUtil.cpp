@@ -25,7 +25,7 @@ bool raftServerRpcUtil::PutAppend(raftKVRpcProctoc::PutAppendArgs *args, raftKVR
   MprpcController controller;
   stub->PutAppend(&controller, args, reply, nullptr);
   if (controller.Failed()) {
-    std::cout << controller.ErrorText() << std::endl;
+    DPrintf("[PutAppend] rpc failed: %s", controller.ErrorText().c_str());
   }
   return !controller.Failed();
 }

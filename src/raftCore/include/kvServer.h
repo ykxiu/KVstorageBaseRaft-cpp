@@ -43,6 +43,11 @@ class KvServer : raftKVRpcProctoc::kvServerRpc {
   // last SnapShot point , raftIndex
   int m_lastSnapShotRaftLogIndex;
 
+  // 优化4：ReadIndex 读优化 — 跟踪 KvServer 已 apply 的最高 raftIndex
+  int m_lastKVApplied{0};
+  std::mutex m_kvApplyCvMtx;
+  std::condition_variable m_kvApplyCv;
+
  public:
   KvServer() = delete;
 
@@ -121,11 +126,17 @@ class KvServer : raftKVRpcProctoc::kvServerRpc {
   }
 
   void parseFromString(const std::string &str) {
-    std::stringstream ss(str);
-    boost::archive::text_iarchive ia(ss);
-    ia >> *this;
-    m_skipList.load_file(m_serializedKVData);
-    m_serializedKVData.clear();
+    try {
+      std::stringstream ss(str);
+      boost::archive::text_iarchive ia(ss);
+      ia >> *this;
+      m_skipList.load_file(m_serializedKVData);
+      m_serializedKVData.clear();
+    } catch (const boost::archive::archive_exception &e) {
+      std::cerr << "[KvServer::parseFromString] boost archive exception: " << e.what() << std::endl;
+    } catch (const std::exception &e) {
+      std::cerr << "[KvServer::parseFromString] exception: " << e.what() << std::endl;
+    }
   }
 
   /////////////////serialiazation end ///////////////////////////////

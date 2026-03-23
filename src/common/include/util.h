@@ -17,7 +17,59 @@
 #include <sstream>
 #include <thread>
 #include <atomic>
+#include <vector>
 #include "config.h"
+
+// 固定大小线程池：替代高频 std::thread + detach，消除线程创建/销毁开销
+class ThreadPool {
+ public:
+  explicit ThreadPool(size_t threadCount = 8) : m_stop(false) {
+    for (size_t i = 0; i < threadCount; ++i) {
+      m_workers.emplace_back([this] {
+        while (true) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lk(m_mtx);
+            m_cv.wait(lk, [this] { return m_stop || !m_tasks.empty(); });
+            if (m_stop && m_tasks.empty()) return;
+            task = std::move(m_tasks.front());
+            m_tasks.pop();
+          }
+          task();
+        }
+      });
+    }
+  }
+
+  template <typename F>
+  void submit(F&& f) {
+    {
+      std::lock_guard<std::mutex> lk(m_mtx);
+      m_tasks.emplace(std::forward<F>(f));
+    }
+    m_cv.notify_one();
+  }
+
+  ~ThreadPool() {
+    {
+      std::lock_guard<std::mutex> lk(m_mtx);
+      m_stop = true;
+    }
+    m_cv.notify_all();
+    for (auto& t : m_workers) t.join();
+  }
+
+  // 禁止拷贝
+  ThreadPool(const ThreadPool&) = delete;
+  ThreadPool& operator=(const ThreadPool&) = delete;
+
+ private:
+  std::vector<std::thread> m_workers;
+  std::queue<std::function<void()>> m_tasks;
+  std::mutex m_mtx;
+  std::condition_variable m_cv;
+  bool m_stop;
+};
 
 template <class F>
 class DeferClass {
@@ -60,106 +112,55 @@ void sleepNMilliseconds(int N);
 
 // ////////////////////////异步写日志的日志队列
 // read is blocking!!! LIKE  go chan
-// 无锁 MPSC 队列 
-// - 多个生产者调用 Push
-// - 单个消费者调用 Pop / timeOutPop
 template <typename T>
 class LockQueue {
  public:
-  LockQueue() {
-    Node* dummy = new Node();
-    m_head = dummy;                 // consumer 所有
-    m_tail.store(dummy);            // producers 原子交换
-  }
-
-  ~LockQueue() {
-    // 清理剩余节点
-    Node* node = m_head;
-    while (node) {
-      Node* next = node->next.load(std::memory_order_relaxed);
-      delete node;
-      node = next;
-    }
-  }
-  // 多个producer并发安全，无锁
+  // 多个worker线程都会写日志queue
   void Push(const T& data) {
-    Node* node = new Node(data);
-    node->next.store(nullptr, std::memory_order_relaxed);
-
-    Node* prev = std::atomic_exchange_explicit(&m_tail, node, std::memory_order_acq_rel);
-    prev->next.store(node, std::memory_order_release);
-
-    // 唤醒consumer（等待时会使用m_waitMutex），此处不保护数据结构，只用于信号
+    std::lock_guard<std::mutex> lock(m_mutex);  //使用lock_gurad，即RAII的思想保证锁正确释放
+    m_queue.push(data);
     m_condvariable.notify_one();
   }
-  // 单个consumer 调用，阻塞直到有数据
+
+  // 一个线程读日志queue，写日志文件
   T Pop() {
-    for (;;) {
-      T out;
-      if (tryPop(out)) return out;
-
-      std::unique_lock<std::mutex> lk(m_waitMutex);
-      m_condvariable.wait(lk, [&] { return !isEmpty(); });
-      // loop 再次尝试取数据
+    std::unique_lock<std::mutex> lock(m_mutex);
+    while (m_queue.empty()) {
+      // 日志队列为空，线程进入wait状态
+      m_condvariable.wait(lock);  //这里用unique_lock是因为lock_guard不支持解锁，而unique_lock支持
     }
+    T data = m_queue.front();
+    m_queue.pop();
+    return data;
   }
 
-  // 带超时的Pop，超时返回false
-  bool timeOutPop(int timeout, T* ResData) {
-    T out;
-    if (tryPop(out)) {
-      *ResData = std::move(out);
-      return true;
+  bool timeOutPop(int timeout, T* ResData)  // 添加一个超时时间参数，默认为 50 毫秒
+  {
+    std::unique_lock<std::mutex> lock(m_mutex);
+
+    // 获取当前时间点，并计算出超时时刻
+    auto now = std::chrono::system_clock::now();
+    auto timeout_time = now + std::chrono::milliseconds(timeout);
+
+    // 在超时之前，不断检查队列是否为空
+    while (m_queue.empty()) {
+      // 如果已经超时了，就返回一个空对象
+      if (m_condvariable.wait_until(lock, timeout_time) == std::cv_status::timeout) {
+        return false;
+      } else {
+        continue;
+      }
     }
 
-    std::unique_lock<std::mutex> lk(m_waitMutex);
-    if (!m_condvariable.wait_for(lk, std::chrono::milliseconds(timeout), [&] { return !isEmpty(); })) {
-      return false;  // 超时且仍然为空
-    }
-
-    if (tryPop(out)) {
-      *ResData = std::move(out);
-      return true;
-    }
-    return false;
-  }
-
- private:
-  struct Node {
-    std::atomic<Node*> next;
-    T data;
-    bool hasData;
-
-    Node() : next(nullptr), data(), hasData(false) {}
-    Node(const T& d) : next(nullptr), data(d), hasData(true) {}
-  };
-
-  // tryPop: 非阻塞尝试弹出
-  bool tryPop(T& out) {
-    Node* head = m_head;
-    Node* next = head->next.load(std::memory_order_acquire);
-    if (next == nullptr) return false;
-
-    // next 存在，消费它
-    out = std::move(next->data);
-    m_head = next;
-    delete head;  // 只有consumer删除节点，安全
+    T data = m_queue.front();
+    m_queue.pop();
+    *ResData = data;
     return true;
   }
 
-  bool isEmpty() {
-    Node* head = m_head;
-    Node* next = head->next.load(std::memory_order_acquire);
-    return next == nullptr;
-  }
-
-  // consumer 所有权（非原子）
-  Node* m_head;
-  // producers 原子尾指针
-  std::atomic<Node*> m_tail;
-
-  // 仅用于在Pop上等待的同步；数据结构本身依然为无锁
-  std::mutex m_waitMutex;
+ private:
+  std::queue<T> m_queue;
+  std::mutex m_mutex;
   std::condition_variable m_condvariable;
 };
 
