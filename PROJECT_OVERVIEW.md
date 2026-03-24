@@ -154,9 +154,10 @@ PutAppend(key, value, op, clientId, requestId)        → (err)
 
 每次应用命令后检查：
 ```
-if raftNode.GetRaftStateSize() > m_maxRaftState / 10.0 → 调用 raftNode.Snapshot(...)
+if raftNode.GetRaftStateSize() > m_maxRaftState * 0.9 → 调用 raftNode.Snapshot(...)
 ```
-10% 阈值提供提前压缩，防止日志爆炸式增长。
+*原本设定10%，但是10%阈值会触发大量io操作，拖累整个系统*
+90% 阈值提供提前压缩，防止日志爆炸式增长。
 
 ---
 
