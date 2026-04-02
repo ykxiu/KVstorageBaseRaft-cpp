@@ -18,15 +18,13 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
             args->term(), m_me, m_currentTerm);
     return;  // 注意从过期的领导人收到消息不要重设定时器
   }
-  //    //由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
+  //由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
   DEFER { persist(); };  // 由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
   if (args->term() > m_currentTerm) {
     // 三变 ,防止遗漏，无论什么时候都是三变
-    // DPrintf("[func-AppendEntries-rf{%v} ] 变成follower且更新term 因为Leader{%v}的term{%v}> rf{%v}.term{%v}\n", rf.me,
-    // args.LeaderId, args.Term, rf.me, rf.currentTerm)
     m_status = Follower;
     m_currentTerm = args->term();
-    m_votedFor = -1;  // 这里设置成-1有意义，如果突然宕机然后上线理论上是可以投票的
+    m_votedFor = -1;
     // 这里可不返回，应该改成让改节点尝试接收日志
     // 如果是领导人和candidate突然转到Follower好像也不用其他操作
     // 如果本来就是Follower，那么其term变化，相当于“不言自明”的换了追随的对象，因为原来的leader的term更小，是不会再接收其消息了
@@ -40,7 +38,7 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
   m_status = Follower;  // 这里是有必要的，因为如果candidate收到同一个term的leader的AE，需要变成follower
   // term相等
   m_lastResetElectionTime = now();
-  //  DPrintf("[	AppendEntries-func-rf(%v)		] 重置了选举超时定时器\n", rf.me);
+ 
 
   // 不能无脑的从prevlogIndex开始阶段日志，因为rpc可能会延迟，导致发过来的log是很久之前的
 
@@ -49,8 +47,6 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     reply->set_success(false);
     reply->set_term(m_currentTerm);
     reply->set_updatenextindex(getLastLogIndex() + 1);
-    //  DPrintf("[func-AppendEntries-rf{%v}] 拒绝了节点{%v}，因为日志太新,args.PrevLogIndex{%v} >
-    //  lastLogIndex{%v}，返回值：{%v}\n", rf.me, args.LeaderId, args.PrevLogIndex, rf.getLastLogIndex(), reply)
     return;
   } else if (args->prevlogindex() < m_lastSnapshotIncludeIndex) {
     // 如果prevlogIndex还没有更上快照
@@ -63,7 +59,6 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
   }
  
   if (matchLog(args->prevlogindex(), args->prevlogterm())) {
-
     for (int i = 0; i < args->entries_size(); i++) {
       auto log = args->entries(i);
       // 跳过已经被快照截断的日志条目，防止 getSlicesIndexFromLogIndex 越界 assert
@@ -274,8 +269,9 @@ void Raft::electionTimeOutTicker() {
      * 如果不睡眠，那么对于leader，这个函数会一直空转，浪费cpu。且加入协程之后，空转会导致其他协程无法运行，对于时间敏感的AE，会导致心跳无法正常发送导致异常
      */
     while (m_status == Leader) {
-      usleep(
-          HeartBeatTimeout);  // 定时时间没有严谨设置，因为HeartBeatTimeout比选举超时一般小一个数量级，因此就设置为HeartBeatTimeout了
+      // 优化A：从 HeartBeatTimeout(25ms) 提高到 100ms，减少 Leader 节点无效唤醒频率 75%。
+      // 100ms << minRandomizedElectionTime(300ms)，不影响选举时序安全性。
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::chrono::duration<signed long int, std::ratio<1, 1000000000>> suitableSleepTime{};
     std::chrono::system_clock::time_point wakeTime{};
@@ -446,8 +442,10 @@ void Raft::leaderHearBeatTicker() {
   // 若无新日志则 wait_for 超时后发送纯心跳，维持 Leader 权威。
   while (true) {
     // 非 Leader 时低频轮询，避免空转
+    // 优化A：从 HeartBeatTimeout(25ms) 提高到 50ms，减少 Follower/Candidate 无效唤醒。
+    // doElection() 胜选后立即广播心跳，leaderHearBeatTicker 最多延迟 50ms 接管后续心跳，仍远小于选举超时下限 300ms。
     while (m_status != Leader) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(HeartBeatTimeout));
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     {
@@ -552,9 +550,7 @@ void Raft::persist() {
 void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProctoc::RequestVoteReply* reply) {
   std::lock_guard<std::mutex> lg(m_mtx);
 
-  // Your code here (2A, 2B).
   DEFER {
-    // 应该先持久化，再撤销lock
     persist();
   };
   // 对args的term的三种情况分别进行处理，大于小于等于自己的term都是不同的处理
@@ -596,8 +592,6 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
   // todo ： 啥时候会出现rf.votedFor == args.CandidateId ，就算candidate选举超时再选举，其term也是不一样的呀
   //     当因为网络质量不好导致的请求丢失重发就有可能！！！！
   if (m_votedFor != -1 && m_votedFor != args->candidateid()) {
-    //        DPrintf("[	    func-RequestVote-rf(%v)		] : refuse voted rf[%v] ,because has voted\n",
-    //        rf.me, args.CandidateId)
     reply->set_term(m_currentTerm);
     reply->set_votestate(Voted);
     reply->set_votegranted(false);
@@ -606,7 +600,6 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
   } else {
     m_votedFor = args->candidateid();
     m_lastResetElectionTime = now();  // 认为必须要在投出票的时候才重置定时器，
-    //        DPrintf("[	    func-RequestVote-rf(%v)		] : voted rf[%v]\n", rf.me, rf.votedFor)
     reply->set_term(m_currentTerm);
     reply->set_votestate(Normal);
     reply->set_votegranted(true);
@@ -704,9 +697,9 @@ int Raft::getSlicesIndexFromLogIndex(int logIndex) {
 bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVoteArgs> args,
                            std::shared_ptr<raftRpcProctoc::RequestVoteReply> reply, std::shared_ptr<int> votedNum) {
   auto start = now();
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 開始", m_me, server);
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 开始", m_me, server);
   bool ok = m_peers[server]->RequestVote(args.get(), reply.get());
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 完畢，耗時:{%d} ms", m_me, server,
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 完毕，耗时:{%d} ms", m_me, server,
           now() - start);
 
   if (!ok) {
@@ -746,7 +739,6 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
     }
     //	第一次变成leader，初始化状态和nextIndex、matchIndex
     m_status = Leader;
-
     DPrintf("[func-sendRequestVote rf{%d}] elect success  ,current term:{%d} ,lastLogIndex:{%d}\n", m_me, m_currentTerm,
             getLastLogIndex());
 

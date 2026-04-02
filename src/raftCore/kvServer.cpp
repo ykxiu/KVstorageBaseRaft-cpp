@@ -96,6 +96,7 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetR
   } else {
     reply->set_err(ErrNoKey);
     reply->set_value("");
+    return ;
   }
 }
 
@@ -200,6 +201,7 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs *args, raftKVRpcP
       reply->set_err(OK);  // 超时了,但因为是重复的请求，返回ok，实际上就算没有超时，在真正执行的时候也要判断是否重复
     } else {
       reply->set_err(ErrWrongLeader);  ///这里返回这个的目的让clerk重新尝试
+      return;
     }
   } else {
     DPrintf(
@@ -211,6 +213,7 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs *args, raftKVRpcP
       reply->set_err(OK);
     } else {
       reply->set_err(ErrWrongLeader);
+      return ;
     }
   }
 
@@ -251,18 +254,6 @@ void KvServer::ReadSnapShotToInstall(std::string snapshot) {
   }
   parseFromString(snapshot);
 
-  //    r := bytes.NewBuffer(snapshot)
-  //    d := labgob.NewDecoder(r)
-  //
-  //    var persist_kvdb map[string]string  //理应快照
-  //    var persist_lastRequestId map[int64]int //快照这个为了维护线性一致性
-  //
-  //    if d.Decode(&persist_kvdb) != nil || d.Decode(&persist_lastRequestId) != nil {
-  //                DPrintf("KVSERVER %d read persister got a problem!!!!!!!!!!",kv.me)
-  //        } else {
-  //        kv.kvDB = persist_kvdb
-  //        kv.lastRequestId = persist_lastRequestId
-  //    }
 }
 
 bool KvServer::SendMessageToWaitChan(const Op &op, int raftIndex) {

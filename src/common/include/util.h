@@ -23,7 +23,8 @@
 // 固定大小线程池：替代高频 std::thread + detach，消除线程创建/销毁开销
 class ThreadPool {
  public:
-  explicit ThreadPool(size_t threadCount = 8) : m_stop(false) {
+  // 优化B：默认从 8 缩减到 4。3 节点集群最多 2 个并发 AE 任务，4 线程有足够余量。
+  explicit ThreadPool(size_t threadCount = 4) : m_stop(false) {
     for (size_t i = 0; i < threadCount; ++i) {
       m_workers.emplace_back([this] {
         while (true) {
@@ -231,18 +232,5 @@ bool isReleasePort(unsigned short usPort);
 
 bool getReleasePort(short& port);
 
-// int main(int argc, char** argv)
-//{
-//     short port = 9060;
-//     if(getReleasePort(port)) //在port的基础上获取一个可用的port
-//     {
-//         std::cout << "可用的端口号为：" << port << std::endl;
-//     }
-//     else
-//     {
-//         std::cout << "获取可用端口号失败！" << std::endl;
-//     }
-//     return 0;
-// }
 
 #endif  //  UTIL_H

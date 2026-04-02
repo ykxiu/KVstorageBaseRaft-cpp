@@ -150,8 +150,8 @@ bool MprpcChannel::newConnect(const char* ip, uint16_t port, string* errMsg) {
   // 设置接收超时：CONSENSUS_TIMEOUT=500ms，选举最多 500ms，多轮重试最多 3×500ms≈1.5s
   // 设置 6s 给极端情况（如快照占用 m_mtx 导致多轮重试）留足裕量
   struct timeval tv;
-  tv.tv_sec = 6;
-  tv.tv_usec = 0;
+  tv.tv_sec = 0;
+  tv.tv_usec = 700;
   setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   return true;

@@ -2,12 +2,12 @@
 // Created by swx on 23-6-4.
 //
 #include "clerk.h"
-#include "raftServerRpcUtil.h"
-#include "util.h"
 #include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
+#include "raftServerRpcUtil.h"
+#include "util.h"
 
 std::string Clerk::Get(std::string key) {
   m_requestId++;

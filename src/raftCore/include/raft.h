@@ -108,7 +108,6 @@ class Raft : public raftRpcProctoc::raftRpc {
   int getLogTermFromLogIndex(int logIndex);
   int GetRaftStateSize();
   int getSlicesIndexFromLogIndex(int logIndex);
-
   bool sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVoteArgs> args,
                        std::shared_ptr<raftRpcProctoc::RequestVoteReply> reply, std::shared_ptr<int> votedNum);
   bool sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendEntriesArgs> args,

@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/home/kai/KVstorageBaseRaft-cpp/src/common/include -I/home/kai/KVstorageBaseRaft-cpp/src/fiber/include -I/home/kai/KVstorageBaseRaft-cpp/src/rpc/include -I/home/kai/KVstorageBaseRaft-cpp/example -I/home/kai/KVstorageBaseRaft-cpp/src/raftCore/include -I/home/kai/KVstorageBaseRaft-cpp/src/raftRpcPro/include -I/home/kai/KVstorageBaseRaft-cpp/src/raftClerk/include -I/home/kai/KVstorageBaseRaft-cpp/src/skipList/include
 
-CXX_FLAGS = -g -std=gnu++20
+CXX_FLAGS = -O2 -g -fno-omit-frame-pointer -pg -g -O2 -O2 -g -DNDEBUG -std=gnu++20
 
